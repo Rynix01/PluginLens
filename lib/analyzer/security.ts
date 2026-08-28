@@ -14,10 +14,7 @@ const RULES: Rule[] = [
   { id: "reflection", category: "reflection", title: "Reflective loading", description: "References reflection or dynamic class-loading APIs.", severity: "medium", weight: 15, patterns: ["java/lang/reflect", "java/lang/ClassLoader", "forName"] },
 ];
 
-/**
- * A deliberately conservative first-pass scanner. It reads class-file constant
- * pools as byte strings only; a match signals capability, never malicious intent.
- */
+/** Uses decoded method calls when available and falls back to constant-pool signals. */
 export function scanSecurity(classes: ParsedClass[]): SecurityReport {
   const findings = RULES.map((rule) => findingFor(rule, classes)).filter((finding): finding is SecurityFinding => finding !== null);
   const obfuscation = detectObfuscation(classes.map(({ path }) => path));
@@ -27,6 +24,8 @@ export function scanSecurity(classes: ParsedClass[]): SecurityReport {
 }
 
 function findingFor(rule: Rule, classes: ParsedClass[]): SecurityFinding | null {
+  const callMatches = classes.flatMap((item) => item.calls.filter((call) => rule.patterns.some((pattern) => `${call.owner}.${call.name}`.includes(pattern))).map((call) => ({ className: item.name, call })));
+  if (callMatches.length) return { id: rule.id, category: rule.category, title: rule.title, description: rule.description, severity: rule.severity, occurrences: callMatches.length, locations: callMatches.slice(0, 6).map(({ className, call }) => `${className}#${call.caller} → ${call.owner}.${call.name}${call.descriptor}`) };
   const matching = classes.map((item) => ({ name: item.name, occurrences: rule.patterns.reduce((total, pattern) => total + count(item.byteText, pattern), 0) })).filter((item) => item.occurrences > 0);
   const occurrences = matching.reduce((total, item) => total + item.occurrences, 0);
   return occurrences ? { id: rule.id, category: rule.category, title: rule.title, description: rule.description, severity: rule.severity, occurrences, locations: matching.slice(0, 4).map((item) => item.name) } : null;
