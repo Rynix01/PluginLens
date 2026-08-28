@@ -1,7 +1,7 @@
 import type { ParsedClass } from "./class-parser";
 
 export type RiskLevel = "low" | "medium" | "high" | "critical";
-export type FindingCategory = "network" | "filesystem" | "execution" | "reflection" | "obfuscation";
+export type FindingCategory = "network" | "filesystem" | "execution" | "reflection" | "obfuscation" | "native" | "bytecode" | "archive" | "environment";
 export type SecurityFinding = { id: string; category: FindingCategory; title: string; description: string; severity: "info" | "medium" | "high"; occurrences: number; locations: string[] };
 export type SecurityReport = { score: number; level: RiskLevel; findings: SecurityFinding[]; scannedClasses: number };
 
@@ -12,16 +12,21 @@ const RULES: Rule[] = [
   { id: "filesystem", category: "filesystem", title: "Filesystem access", description: "References APIs that can read or write local files.", severity: "medium", weight: 14, patterns: ["java/io/File", "java/nio/file/Files", "java/nio/file/Path"] },
   { id: "execution", category: "execution", title: "Process execution", description: "References APIs capable of launching an operating-system process.", severity: "high", weight: 35, patterns: ["java/lang/Runtime", "java/lang/ProcessBuilder"] },
   { id: "reflection", category: "reflection", title: "Reflective loading", description: "References reflection or dynamic class-loading APIs.", severity: "medium", weight: 15, patterns: ["java/lang/reflect", "java/lang/ClassLoader", "forName"] },
+  { id: "native-loading", category: "native", title: "Native code loading", description: "Can load native DLL, SO, or dylib code outside the JVM sandbox.", severity: "high", weight: 30, patterns: ["java/lang/System.load", "java/lang/System.loadLibrary", "com/sun/jna"] },
+  { id: "bytecode-manipulation", category: "bytecode", title: "Runtime bytecode manipulation", description: "References instrumentation, Unsafe, ASM, Byte Buddy, or Javassist APIs.", severity: "high", weight: 24, patterns: ["java/lang/instrument", "sun/misc/Unsafe", "jdk/internal/misc/Unsafe", "org/objectweb/asm", "net/bytebuddy", "javassist/"] },
+  { id: "environment", category: "environment", title: "Environment inspection", description: "Reads environment variables or JVM/system properties.", severity: "info", weight: 6, patterns: ["java/lang/System.getenv", "java/lang/System.getProperty"] },
 ];
 
 /** Uses decoded method calls when available and falls back to constant-pool signals. */
-export function scanSecurity(classes: ParsedClass[]): SecurityReport {
+export function scanSecurity(classes: ParsedClass[], archivePaths: string[] = []): SecurityReport {
   const findings = RULES.map((rule) => findingFor(rule, classes)).filter((finding): finding is SecurityFinding => finding !== null);
   const obfuscation = detectObfuscation(classes.map(({ path }) => path));
   if (obfuscation) findings.push(obfuscation);
-  const score = Math.min(100, findings.reduce((total, finding) => total + (RULES.find((rule) => rule.id === finding.id)?.weight ?? 18), 0));
+  findings.push(...archiveFindings(archivePaths));
+  const score = Math.min(100, findings.reduce((total, finding) => total + (RULES.find((rule) => rule.id === finding.id)?.weight ?? ({ "native-binaries": 26, "executable-resources": 32, "embedded-jars": 7, obfuscation: 18 } as Record<string, number>)[finding.id] ?? 12), 0));
   return { score, level: score >= 70 ? "critical" : score >= 45 ? "high" : score >= 20 ? "medium" : "low", findings, scannedClasses: classes.length };
 }
+function archiveFindings(paths: string[]): SecurityFinding[] { const findings: SecurityFinding[] = []; const native = paths.filter((path) => /\.(dll|so|dylib)$/i.test(path)); const executables = paths.filter((path) => /\.(exe|bat|cmd|ps1|vbs)$/i.test(path)); const nestedJars = paths.filter((path) => path.toLowerCase().endsWith(".jar")); if (native.length) findings.push({ id: "native-binaries", category: "native", title: "Bundled native binaries", description: "The archive contains platform-native executable libraries.", severity: "high", occurrences: native.length, locations: native.slice(0, 6) }); if (executables.length) findings.push({ id: "executable-resources", category: "archive", title: "Bundled executable resources", description: "The archive includes operating-system scripts or executables.", severity: "high", occurrences: executables.length, locations: executables.slice(0, 6) }); if (nestedJars.length) findings.push({ id: "embedded-jars", category: "archive", title: "Embedded JAR dependencies", description: "Nested JARs increase the amount of code that needs review.", severity: "info", occurrences: nestedJars.length, locations: nestedJars.slice(0, 6) }); return findings; }
 
 function findingFor(rule: Rule, classes: ParsedClass[]): SecurityFinding | null {
   const callMatches = classes.flatMap((item) => item.calls.filter((call) => rule.patterns.some((pattern) => `${call.owner}.${call.name}`.includes(pattern))).map((call) => ({ className: item.name, call })));
