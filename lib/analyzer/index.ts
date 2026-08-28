@@ -15,6 +15,6 @@ export async function analyzePluginJar(file: File): Promise<AnalysisResult> {
   const metadata = await parsePluginMetadata(zip);
   const parsedClasses = await parseClassFiles(zip);
   const security = scanSecurity(parsedClasses);
-  const build = await inspectBuild(zip, bytes);
+  const build = await inspectBuild(zip, bytes, metadata.version);
   return { file: { name: file.name, size: file.size }, metadata, archive: { entryCount: paths.length, classCount: paths.filter((path) => path.endsWith(".class")).length, resourceCount: paths.filter((path) => !path.endsWith(".class")).length }, classes: buildInventory(parsedClasses), security, build };
 }

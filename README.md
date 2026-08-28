@@ -14,7 +14,7 @@ PluginLens is a local-first inspector for Minecraft plugin JARs. It helps server
 - Overview of name, version, main class, authors, website, and archive counts
 - First-pass local security scan for network, filesystem, process-launching, reflection, and obfuscation signals
 - Dependency-free JVM class-file parser with class names, class format versions, and declared method inventory
-- Local SHA-256 binary fingerprint and embedded manifest/Maven/git build metadata extraction
+- Local SHA-256 binary fingerprint and embedded Gradle/Maven/Git/manifest build metadata extraction
 - Modular analyzer foundation for security scanning, bytecode parsing, and build/source verification
 
 ## Getting started
