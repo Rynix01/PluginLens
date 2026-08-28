@@ -2,6 +2,8 @@
 
 PluginLens is a local-first static inspector for Minecraft Bukkit, Spigot, Paper, Purpur, and Folia plugin JARs. It gives server owners evidence about a plugin before it reaches a live server.
 
+Current release: **v1.0.0**.
+
 ## Privacy model
 
 **The selected JAR never leaves the browser.** Archive reading, YAML parsing, JVM class parsing, SHA-256 calculation, and report generation all run client-side. There is no upload endpoint and no server-side JAR processing.
