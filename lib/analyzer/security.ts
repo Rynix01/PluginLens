@@ -1,44 +1,155 @@
-import type { ParsedClass } from "./class-parser";
+import type { MethodCall, ParsedClass } from "./class-parser";
 
-export type RiskLevel = "low" | "medium" | "high" | "critical";
-export type FindingCategory = "network" | "filesystem" | "execution" | "reflection" | "obfuscation" | "native" | "bytecode" | "archive" | "environment";
-export type SecurityFinding = { id: string; category: FindingCategory; title: string; description: string; severity: "info" | "medium" | "high"; occurrences: number; locations: string[] };
-export type SecurityReport = { score: number; level: RiskLevel; findings: SecurityFinding[]; scannedClasses: number };
+export type FindingSeverity = "info" | "medium" | "high";
+export type FindingScope = "plugin" | "dependency" | "archive";
+export type SecurityFinding = {
+  id: string;
+  category: string;
+  title: string;
+  description: string;
+  severity: FindingSeverity;
+  scope: FindingScope;
+  scoreImpact: number;
+  occurrences: number;
+  locations: string[];
+};
+export type SecurityReport = {
+  score: number;
+  level: "low" | "medium" | "high" | "critical";
+  findings: SecurityFinding[];
+  scannedClasses: number;
+};
 
-type Rule = Omit<SecurityFinding, "occurrences" | "locations"> & { patterns: string[]; weight: number };
+type Rule = {
+  id: string;
+  category: string;
+  title: string;
+  description: string;
+  severity: FindingSeverity;
+  impact: number;
+  matches: (call: MethodCall) => boolean;
+};
 
 const RULES: Rule[] = [
-  { id: "network", category: "network", title: "Network capability", description: "References HTTP, URL, socket, or web client APIs.", severity: "medium", weight: 18, patterns: ["java/net/URL", "java/net/Socket", "java/net/http", "okhttp3/", "org/apache/http"] },
-  { id: "filesystem", category: "filesystem", title: "Filesystem access", description: "References APIs that can read or write local files.", severity: "medium", weight: 14, patterns: ["java/io/File", "java/nio/file/Files", "java/nio/file/Path"] },
-  { id: "execution", category: "execution", title: "Process execution", description: "References APIs capable of launching an operating-system process.", severity: "high", weight: 35, patterns: ["java/lang/Runtime", "java/lang/ProcessBuilder"] },
-  { id: "reflection", category: "reflection", title: "Reflective loading", description: "References reflection or dynamic class-loading APIs.", severity: "medium", weight: 15, patterns: ["java/lang/reflect", "java/lang/ClassLoader", "forName"] },
-  { id: "native-loading", category: "native", title: "Native code loading", description: "Can load native DLL, SO, or dylib code outside the JVM sandbox.", severity: "high", weight: 30, patterns: ["java/lang/System.load", "java/lang/System.loadLibrary", "com/sun/jna"] },
-  { id: "bytecode-manipulation", category: "bytecode", title: "Runtime bytecode manipulation", description: "References instrumentation, Unsafe, ASM, Byte Buddy, or Javassist APIs.", severity: "high", weight: 24, patterns: ["java/lang/instrument", "sun/misc/Unsafe", "jdk/internal/misc/Unsafe", "org/objectweb/asm", "net/bytebuddy", "javassist/"] },
-  { id: "environment", category: "environment", title: "Environment inspection", description: "Reads environment variables or JVM/system properties.", severity: "info", weight: 6, patterns: ["java/lang/System.getenv", "java/lang/System.getProperty"] },
+  {
+    id: "network",
+    category: "network",
+    title: "Network capability",
+    description: "Uses networking APIs. This is common for updates, webhooks, metrics and license checks; review the destination and transmitted data.",
+    severity: "info",
+    impact: 5,
+    matches: ({ owner }) => startsWithAny(owner, ["java/net/URL", "java/net/Socket", "java/net/http/", "okhttp3/", "org/apache/http/"]),
+  },
+  {
+    id: "filesystem",
+    category: "filesystem",
+    title: "Filesystem access",
+    description: "Reads or writes files. Configuration, data storage and backups normally require this capability.",
+    severity: "info",
+    impact: 3,
+    matches: ({ owner }) => startsWithAny(owner, ["java/io/File", "java/nio/file/Files", "java/nio/file/Path"]),
+  },
+  {
+    id: "execution",
+    category: "process",
+    title: "Operating-system process execution",
+    description: "Invokes an API that can start an external process. Runtime inspection calls such as availableProcessors are not included.",
+    severity: "high",
+    impact: 40,
+    matches: ({ owner, name }) => (owner === "java/lang/Runtime" && name === "exec") || (owner === "java/lang/ProcessBuilder" && name === "start"),
+  },
+  {
+    id: "reflection",
+    category: "runtime",
+    title: "Reflective or dynamic loading",
+    description: "Uses reflection or dynamic class loading. Frameworks and bundled metrics libraries commonly use these APIs.",
+    severity: "medium",
+    impact: 8,
+    matches: ({ owner, name }) => owner.startsWith("java/lang/reflect/") || (owner === "java/lang/Class" && name === "forName") || (owner === "java/lang/ClassLoader" && ["loadClass", "defineClass"].includes(name)),
+  },
+  {
+    id: "native-loading",
+    category: "native",
+    title: "Native code loading",
+    description: "Can load platform-native code into the server process.",
+    severity: "high",
+    impact: 35,
+    matches: ({ owner, name }) => (owner === "java/lang/System" && ["load", "loadLibrary"].includes(name)) || owner.startsWith("com/sun/jna/"),
+  },
+  {
+    id: "bytecode",
+    category: "runtime",
+    title: "Runtime bytecode manipulation",
+    description: "Uses instrumentation or bytecode-generation APIs. This may be legitimate, but it expands runtime capabilities.",
+    severity: "medium",
+    impact: 18,
+    matches: ({ owner }) => startsWithAny(owner, ["java/lang/instrument/", "sun/misc/Unsafe", "jdk/internal/misc/Unsafe", "org/objectweb/asm/", "net/bytebuddy/", "javassist/"]),
+  },
+  {
+    id: "environment",
+    category: "environment",
+    title: "Environment inspection",
+    description: "Reads environment variables or JVM system properties. This is informational unless combined with more sensitive behavior.",
+    severity: "info",
+    impact: 0,
+    matches: ({ owner, name }) => owner === "java/lang/System" && ["getenv", "getProperty"].includes(name),
+  },
 ];
 
-/** Uses decoded method calls when available and falls back to constant-pool signals. */
-export function scanSecurity(classes: ParsedClass[], archivePaths: string[] = []): SecurityReport {
-  const findings = RULES.map((rule) => findingFor(rule, classes)).filter((finding): finding is SecurityFinding => finding !== null);
-  const obfuscation = detectObfuscation(classes.map(({ path }) => path));
-  if (obfuscation) findings.push(obfuscation);
-  findings.push(...archiveFindings(archivePaths));
-  const score = Math.min(100, findings.reduce((total, finding) => total + (RULES.find((rule) => rule.id === finding.id)?.weight ?? ({ "native-binaries": 26, "executable-resources": 32, "embedded-jars": 7, obfuscation: 18 } as Record<string, number>)[finding.id] ?? 12), 0));
-  return { score, level: score >= 70 ? "critical" : score >= 45 ? "high" : score >= 20 ? "medium" : "low", findings, scannedClasses: classes.length };
-}
-function archiveFindings(paths: string[]): SecurityFinding[] { const findings: SecurityFinding[] = []; const native = paths.filter((path) => /\.(dll|so|dylib)$/i.test(path)); const executables = paths.filter((path) => /\.(exe|bat|cmd|ps1|vbs)$/i.test(path)); const nestedJars = paths.filter((path) => path.toLowerCase().endsWith(".jar")); if (native.length) findings.push({ id: "native-binaries", category: "native", title: "Bundled native binaries", description: "The archive contains platform-native executable libraries.", severity: "high", occurrences: native.length, locations: native.slice(0, 6) }); if (executables.length) findings.push({ id: "executable-resources", category: "archive", title: "Bundled executable resources", description: "The archive includes operating-system scripts or executables.", severity: "high", occurrences: executables.length, locations: executables.slice(0, 6) }); if (nestedJars.length) findings.push({ id: "embedded-jars", category: "archive", title: "Embedded JAR dependencies", description: "Nested JARs increase the amount of code that needs review.", severity: "info", occurrences: nestedJars.length, locations: nestedJars.slice(0, 6) }); return findings; }
+/** Scores exact decoded calls and separates plugin-owned code from shaded dependencies. */
+export function scanSecurity(classes: ParsedClass[], archivePaths: string[], mainClass?: string): SecurityReport {
+  const findings: SecurityFinding[] = [];
+  const firstPartyPrefix = pluginPackage(mainClass);
 
-function findingFor(rule: Rule, classes: ParsedClass[]): SecurityFinding | null {
-  const callMatches = classes.flatMap((item) => item.calls.filter((call) => rule.patterns.some((pattern) => `${call.owner}.${call.name}`.includes(pattern))).map((call) => ({ className: item.name, call })));
-  if (callMatches.length) return { id: rule.id, category: rule.category, title: rule.title, description: rule.description, severity: rule.severity, occurrences: callMatches.length, locations: callMatches.slice(0, 6).map(({ className, call }) => `${className}#${call.caller} → ${call.owner}.${call.name}${call.descriptor}`) };
-  const matching = classes.map((item) => ({ name: item.name, occurrences: rule.patterns.reduce((total, pattern) => total + count(item.byteText, pattern), 0) })).filter((item) => item.occurrences > 0);
-  const occurrences = matching.reduce((total, item) => total + item.occurrences, 0);
-  return occurrences ? { id: rule.id, category: rule.category, title: rule.title, description: rule.description, severity: rule.severity, occurrences, locations: matching.slice(0, 4).map((item) => item.name) } : null;
+  for (const rule of RULES) {
+    const matches = classes.flatMap((parsedClass) => parsedClass.calls
+      .filter(rule.matches)
+      .map((call) => ({ parsedClass, call })));
+    if (!matches.length) continue;
+
+    const pluginMatches = matches.filter(({ parsedClass }) => isPluginClass(parsedClass.name, firstPartyPrefix));
+    const dependencyMatches = matches.filter(({ parsedClass }) => !isPluginClass(parsedClass.name, firstPartyPrefix));
+    if (pluginMatches.length) findings.push(callFinding(rule, "plugin", pluginMatches));
+    if (dependencyMatches.length) findings.push(callFinding(rule, "dependency", dependencyMatches));
+  }
+
+  const nativePaths = archivePaths.filter((path) => /\.(dll|so|dylib)$/i.test(path));
+  if (nativePaths.length) findings.push(archiveFinding("native-binaries", "native", "Native binaries bundled", "Contains platform-native binaries. Their behavior cannot be fully established from JVM bytecode alone.", "high", 25, nativePaths));
+  const executablePaths = archivePaths.filter((path) => /\.(exe|bat|cmd|ps1|sh)$/i.test(path));
+  if (executablePaths.length) findings.push(archiveFinding("executable-resources", "process", "Executable resources bundled", "Contains scripts or executable files that warrant manual review.", "high", 30, executablePaths));
+  const embeddedJars = archivePaths.filter((path) => path.toLowerCase().endsWith(".jar"));
+  if (embeddedJars.length) findings.push(archiveFinding("embedded-jars", "archive", "Embedded JARs", "Contains nested Java archives. These are reported as inventory, not treated as malicious by themselves.", "info", 0, embeddedJars));
+
+  const score = Math.min(100, findings.reduce((total, finding) => total + finding.scoreImpact, 0));
+  return { score, level: score >= 60 ? "critical" : score >= 30 ? "high" : score >= 10 ? "medium" : "low", findings, scannedClasses: classes.length };
 }
-function detectObfuscation(paths: string[]): SecurityFinding | null {
-  const leafNames = paths.map((path) => path.slice(path.lastIndexOf("/") + 1, -6));
-  const shortNames = leafNames.filter((name) => /^[a-zA-Z]{1,2}\d*$/.test(name));
-  if (paths.length < 12 || shortNames.length / paths.length < 0.65) return null;
-  return { id: "obfuscation", category: "obfuscation", title: "Possible name obfuscation", description: "Most class names are unusually short. This can be normal for optimized builds, but makes review harder.", severity: "medium", occurrences: shortNames.length, locations: paths.filter((path) => /^[^/]+\/[a-zA-Z]{1,2}\d*\.class$/.test(path)).slice(0, 4) };
+
+function callFinding(rule: Rule, scope: "plugin" | "dependency", matches: Array<{ parsedClass: ParsedClass; call: MethodCall }>): SecurityFinding {
+  const dependency = scope === "dependency";
+  return {
+    id: dependency ? `${rule.id}-dependency` : rule.id,
+    category: rule.category,
+    title: rule.title,
+    description: dependency ? `${rule.description} Detected only inside bundled dependency code, so it does not increase the plugin risk score.` : rule.description,
+    severity: dependency ? "info" : rule.severity,
+    scope,
+    scoreImpact: dependency ? 0 : rule.impact,
+    occurrences: matches.length,
+    locations: unique(matches.map(({ parsedClass, call }) => `${parsedClass.name}#${call.caller} → ${call.owner}.${call.name}${call.descriptor}`)).slice(0, 8),
+  };
 }
-function count(value: string, needle: string) { let total = 0; let index = value.indexOf(needle); while (index !== -1) { total += 1; index = value.indexOf(needle, index + needle.length); } return total; }
+
+function archiveFinding(id: string, category: string, title: string, description: string, severity: FindingSeverity, scoreImpact: number, paths: string[]): SecurityFinding {
+  return { id, category, title, description, severity, scope: "archive", scoreImpact, occurrences: paths.length, locations: paths.slice(0, 8) };
+}
+
+function pluginPackage(mainClass?: string) {
+  if (!mainClass) return undefined;
+  const normalized = mainClass.replace(/\./g, "/");
+  const divider = normalized.lastIndexOf("/");
+  return divider > 0 ? normalized.slice(0, divider) : undefined;
+}
+
+function isPluginClass(className: string, prefix?: string) { return !prefix || className === prefix || className.startsWith(`${prefix}/`); }
+function startsWithAny(value: string, prefixes: string[]) { return prefixes.some((prefix) => value.startsWith(prefix)); }
+function unique(values: string[]) { return [...new Set(values)]; }

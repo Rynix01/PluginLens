@@ -1,7 +1,7 @@
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 import { inspectBuild } from "../lib/analyzer/build";
-import { parseClass } from "../lib/analyzer/class-parser";
+import { parseClass, type ParsedClass } from "../lib/analyzer/class-parser";
 import { parsePluginMetadata } from "../lib/analyzer/metadata";
 import { scanSecurity } from "../lib/analyzer/security";
 import { githubRepository, inspectSource } from "../lib/analyzer/source";
@@ -36,10 +36,38 @@ describe("PluginLens analyzers", () => {
 
   it("discovers GitHub repositories and version tag candidates", async () => {
     const zip = new JSZip();
-    zip.file("META-INF/maven/dev.example/plugin/pom.xml", "<project><scm><url>https://github.com/example/ExamplePlugin.git</url></scm></project>");
-    const source = await inspectSource(zip, undefined, "2.4.1");
+    zip.file("META-INF/maven/com.github.patrickfav/bytes-java/pom.xml", "<project><artifactId>bytes-java</artifactId><scm><url>https://github.com/patrickfav/bytes-java.git</url></scm></project>");
+    zip.file("META-INF/maven/dev.example/ExamplePlugin/pom.xml", "<project><artifactId>ExamplePlugin</artifactId><scm><url>https://github.com/example/ExamplePlugin.git</url></scm></project>");
+    const source = await inspectSource(zip, undefined, "2.4.1", { pluginName: "ExamplePlugin", artifact: "ExamplePlugin", mainClass: "dev.example.ExamplePlugin" });
     expect(source.repository?.url).toBe("https://github.com/example/ExamplePlugin");
     expect(source.tagCandidates).toEqual(expect.arrayContaining(["2.4.1", "v2.4.1", "release-2.4.1"]));
     expect(githubRepository("git@github.com:owner/repo.git")?.url).toBe("https://github.com/owner/repo");
+  });
+
+  it("does not mistake shaded dependency metadata for the plugin repository", async () => {
+    const zip = new JSZip();
+    zip.file("META-INF/maven/com.github.patrickfav/bytes-java/pom.xml", "<project><artifactId>bytes-java</artifactId><url>https://github.com/patrickfav/bytes-java</url></project>");
+    const source = await inspectSource(zip, undefined, "2.0", { pluginName: "NexubyCore", artifact: "NexubyCore", mainClass: "tr.net.nexuby.NexubyCore" });
+    expect(source.repository).toBeUndefined();
+  });
+
+  it("keeps harmless Runtime calls out of process execution and discounts bundled dependencies", () => {
+    const dependencyClass: ParsedClass = {
+      path: "org/bstats/bukkit/Metrics.class",
+      name: "org/bstats/bukkit/Metrics",
+      javaVersion: 65,
+      methods: ["appendPlatformData()V"],
+      byteText: "",
+      calls: [
+        { caller: "appendPlatformData()V", owner: "java/lang/Runtime", name: "getRuntime", descriptor: "()Ljava/lang/Runtime;", opcode: "static" },
+        { caller: "appendPlatformData()V", owner: "java/lang/Runtime", name: "availableProcessors", descriptor: "()I", opcode: "virtual" },
+        { caller: "appendPlatformData()V", owner: "java/lang/Class", name: "forName", descriptor: "(Ljava/lang/String;)Ljava/lang/Class;", opcode: "static" },
+        { caller: "appendPlatformData()V", owner: "java/lang/System", name: "getProperty", descriptor: "(Ljava/lang/String;)Ljava/lang/String;", opcode: "static" },
+      ],
+    };
+    const report = scanSecurity([dependencyClass], [], "tr.net.nexuby.NexubyCore");
+    expect(report.findings.some((finding) => finding.id.startsWith("execution"))).toBe(false);
+    expect(report.score).toBe(0);
+    expect(report.findings.every((finding) => finding.scope === "dependency" && finding.scoreImpact === 0)).toBe(true);
   });
 });

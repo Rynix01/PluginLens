@@ -22,9 +22,9 @@ export async function analyzePluginJar(file: File): Promise<AnalysisResult> {
   if (paths.filter((path) => path.endsWith(".class")).length > MAX_CLASS_FILES) throw new Error("This archive contains more than 50,000 classes and was stopped for browser safety.");
   const metadata = await parsePluginMetadata(zip);
   const parsedClasses = await parseClassFiles(zip);
-  const security = scanSecurity(parsedClasses, paths);
+  const security = scanSecurity(parsedClasses, paths, metadata.main);
   const build = await inspectBuild(zip, bytes, metadata.version);
-  const source = await inspectSource(zip, metadata.website, metadata.version || build.implementationVersion);
+  const source = await inspectSource(zip, metadata.website, metadata.version || build.implementationVersion, { pluginName: metadata.name, artifact: build.artifact, mainClass: metadata.main });
   const archive: ArchiveReport = { entryCount: paths.length, classCount: paths.filter((path) => path.endsWith(".class")).length, resourceCount: paths.filter((path) => !path.endsWith(".class")).length, embeddedJarCount: paths.filter((path) => path.toLowerCase().endsWith(".jar")).length, nativeLibraryCount: paths.filter((path) => /\.(dll|so|dylib)$/i.test(path)).length, serviceProviderCount: paths.filter((path) => path.startsWith("META-INF/services/")).length, signed: paths.some((path) => /^META-INF\/[^/]+\.(SF|RSA|DSA)$/i.test(path)) };
   return { schemaVersion: 1, analyzedAt: new Date().toISOString(), file: { name: file.name, size: file.size }, metadata, archive, classes: buildInventory(parsedClasses), security, build, source };
 }

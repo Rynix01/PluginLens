@@ -2,19 +2,20 @@ import type JSZip from "jszip";
 
 export type SourceRepository = { provider: "github"; owner: string; repo: string; url: string };
 export type SourceIdentity = { repository?: SourceRepository; evidence: string[]; version?: string; tagCandidates: string[] };
+export type SourceHints = { pluginName?: string; artifact?: string; mainClass?: string };
 
 /** Discovers source repository hints embedded in descriptors, manifests, Git metadata, or Maven POMs. */
-export async function inspectSource(zip: JSZip, website?: string, version?: string): Promise<SourceIdentity> {
+export async function inspectSource(zip: JSZip, website?: string, version?: string, hints: SourceHints = {}): Promise<SourceIdentity> {
   const candidates: Array<{ value?: string; source: string }> = [{ value: website, source: "plugin descriptor website" }];
   const manifest = parseManifest(await text(zip, "META-INF/MANIFEST.MF"));
   for (const key of ["Implementation-URL", "Project-URL", "Scm-URL", "Build-Scm-Url", "Git-Repository"]) candidates.push({ value: manifest[key], source: `MANIFEST.MF ${key}` });
-  for (const path of Object.keys(zip.files).filter((entry) => /(^|\/)(git|build-info)\.properties$/i.test(entry)).slice(0, 8)) {
+  for (const path of Object.keys(zip.files).filter((entry) => /(^|\/)(git|build-info)\.properties$/i.test(entry) && isProjectMetadataPath(entry, hints)).slice(0, 8)) {
     const properties = parseProperties(await text(zip, path));
     for (const key of ["git.remote.origin.url", "remote.origin.url", "git.repository", "scm.url"]) candidates.push({ value: properties[key], source: `${path} ${key}` });
   }
-  for (const path of Object.keys(zip.files).filter((entry) => /(^|\/)pom\.xml$/i.test(entry)).slice(0, 4)) {
+  for (const path of Object.keys(zip.files).filter((entry) => /(^|\/)pom\.xml$/i.test(entry) && isMatchingPomPath(entry, hints)).slice(0, 4)) {
     const pom = await text(zip, path);
-    for (const value of xmlUrls(pom)) candidates.push({ value, source: path });
+    if (pomMatchesHints(pom, hints)) for (const value of xmlUrls(pom)) candidates.push({ value, source: `${path} (plugin-matched Maven metadata)` });
   }
   for (const candidate of candidates) {
     const repository = githubRepository(candidate.value);
@@ -22,6 +23,32 @@ export async function inspectSource(zip: JSZip, website?: string, version?: stri
   }
   return { evidence: [], version, tagCandidates: tags(version) };
 }
+
+function isProjectMetadataPath(path: string, hints: SourceHints) {
+  const normalizedPath = normalize(path);
+  const identifiers = hintIdentifiers(hints);
+  return !path.includes("/") || /^META-INF\/(git|build-info)\.properties$/i.test(path) || identifiers.some((identifier) => normalizedPath.includes(identifier));
+}
+
+function isMatchingPomPath(path: string, hints: SourceHints) {
+  const identifiers = hintIdentifiers(hints);
+  if (!identifiers.length) return false;
+  const segments = path.split("/").map(normalize).filter(Boolean);
+  return identifiers.some((identifier) => segments.includes(identifier));
+}
+
+function pomMatchesHints(pom: string, hints: SourceHints) {
+  const identifiers = hintIdentifiers(hints);
+  const artifact = pom.match(/<artifactId>\s*([^<]+)\s*<\/artifactId>/i)?.[1];
+  return Boolean(artifact && identifiers.includes(normalize(artifact)));
+}
+
+function hintIdentifiers(hints: SourceHints) {
+  const mainName = hints.mainClass?.split(".").pop();
+  return [...new Set([hints.pluginName, hints.artifact, mainName].map((value) => normalize(value || "")).filter(Boolean))];
+}
+
+function normalize(value: string) { return value.toLowerCase().replace(/[^a-z0-9]/g, ""); }
 
 export function githubRepository(input?: string): SourceRepository | undefined {
   if (!input) return undefined;
