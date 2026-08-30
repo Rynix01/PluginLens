@@ -27,8 +27,26 @@ type Rule = {
   description: string;
   severity: FindingSeverity;
   impact: number;
+  dependencyImpact?: number;
   matches: (call: MethodCall) => boolean;
 };
+
+// Only packages with a strong, recognizable library identity are discounted.
+// Unknown packages must remain first-party: malware can choose any package name.
+const KNOWN_DEPENDENCY_PREFIXES = [
+  "org/bstats/",
+  "com/google/",
+  "com/fasterxml/",
+  "org/apache/commons/",
+  "org/apache/http/",
+  "org/slf4j/",
+  "ch/qos/logback/",
+  "org/yaml/snakeyaml/",
+  "com/github/benmanes/caffeine/",
+  "net/kyori/",
+  "kotlin/",
+  "kotlinx/",
+];
 
 const RULES: Rule[] = [
   {
@@ -56,6 +74,7 @@ const RULES: Rule[] = [
     description: "Invokes an API that can start an external process. Runtime inspection calls such as availableProcessors are not included.",
     severity: "high",
     impact: 40,
+    dependencyImpact: 40,
     matches: ({ owner, name }) => (owner === "java/lang/Runtime" && name === "exec") || (owner === "java/lang/ProcessBuilder" && name === "start"),
   },
   {
@@ -74,6 +93,7 @@ const RULES: Rule[] = [
     description: "Can load platform-native code into the server process.",
     severity: "high",
     impact: 35,
+    dependencyImpact: 35,
     matches: ({ owner, name }) => (owner === "java/lang/System" && ["load", "loadLibrary"].includes(name)) || owner.startsWith("com/sun/jna/"),
   },
   {
@@ -83,6 +103,7 @@ const RULES: Rule[] = [
     description: "Uses instrumentation or bytecode-generation APIs. This may be legitimate, but it expands runtime capabilities.",
     severity: "medium",
     impact: 18,
+    dependencyImpact: 12,
     matches: ({ owner }) => startsWithAny(owner, ["java/lang/instrument/", "sun/misc/Unsafe", "jdk/internal/misc/Unsafe", "org/objectweb/asm/", "net/bytebuddy/", "javassist/"]),
   },
   {
@@ -107,8 +128,8 @@ export function scanSecurity(classes: ParsedClass[], archivePaths: string[], mai
       .map((call) => ({ parsedClass, call })));
     if (!matches.length) continue;
 
-    const pluginMatches = matches.filter(({ parsedClass }) => isPluginClass(parsedClass.name, firstPartyPrefix));
-    const dependencyMatches = matches.filter(({ parsedClass }) => !isPluginClass(parsedClass.name, firstPartyPrefix));
+    const pluginMatches = matches.filter(({ parsedClass }) => classifyClass(parsedClass.name, firstPartyPrefix) === "plugin");
+    const dependencyMatches = matches.filter(({ parsedClass }) => classifyClass(parsedClass.name, firstPartyPrefix) === "dependency");
     if (pluginMatches.length) findings.push(callFinding(rule, "plugin", pluginMatches));
     if (dependencyMatches.length) findings.push(callFinding(rule, "dependency", dependencyMatches));
   }
@@ -126,14 +147,15 @@ export function scanSecurity(classes: ParsedClass[], archivePaths: string[], mai
 
 function callFinding(rule: Rule, scope: "plugin" | "dependency", matches: Array<{ parsedClass: ParsedClass; call: MethodCall }>): SecurityFinding {
   const dependency = scope === "dependency";
+  const scoreImpact = dependency ? rule.dependencyImpact ?? 0 : rule.impact;
   return {
     id: dependency ? `${rule.id}-dependency` : rule.id,
     category: rule.category,
     title: rule.title,
-    description: dependency ? `${rule.description} Detected only inside bundled dependency code, so it does not increase the plugin risk score.` : rule.description,
-    severity: dependency ? "info" : rule.severity,
+    description: dependency ? `${rule.description} Detected inside a known bundled library.${scoreImpact ? " This behavior is sensitive enough that library scope does not suppress it." : " Ordinary library use does not increase the plugin risk score."}` : rule.description,
+    severity: dependency && !scoreImpact ? "info" : rule.severity,
     scope,
-    scoreImpact: dependency ? 0 : rule.impact,
+    scoreImpact,
     occurrences: matches.length,
     locations: unique(matches.map(({ parsedClass, call }) => `${parsedClass.name}#${call.caller} → ${call.owner}.${call.name}${call.descriptor}`)).slice(0, 8),
   };
@@ -150,6 +172,9 @@ function pluginPackage(mainClass?: string) {
   return divider > 0 ? normalized.slice(0, divider) : undefined;
 }
 
-function isPluginClass(className: string, prefix?: string) { return !prefix || className === prefix || className.startsWith(`${prefix}/`); }
+function classifyClass(className: string, firstPartyPrefix?: string): "plugin" | "dependency" {
+  if (firstPartyPrefix && (className === firstPartyPrefix || className.startsWith(`${firstPartyPrefix}/`))) return "plugin";
+  return startsWithAny(className, KNOWN_DEPENDENCY_PREFIXES) ? "dependency" : "plugin";
+}
 function startsWithAny(value: string, prefixes: string[]) { return prefixes.some((prefix) => value.startsWith(prefix)); }
 function unique(values: string[]) { return [...new Set(values)]; }

@@ -70,4 +70,37 @@ describe("PluginLens analyzers", () => {
     expect(report.score).toBe(0);
     expect(report.findings.every((finding) => finding.scope === "dependency" && finding.scoreImpact === 0)).toBe(true);
   });
+
+  it("does not exempt malicious code merely because it lives outside the main package", () => {
+    const backdoor: ParsedClass = {
+      path: "evil/loader/Backdoor.class",
+      name: "evil/loader/Backdoor",
+      javaVersion: 65,
+      methods: ["run()V"],
+      byteText: "",
+      calls: [
+        { caller: "run()V", owner: "java/lang/Runtime", name: "exec", descriptor: "(Ljava/lang/String;)Ljava/lang/Process;", opcode: "virtual" },
+      ],
+    };
+    const report = scanSecurity([backdoor], [], "tr.net.nexuby.NexubyCore");
+    expect(report.score).toBeGreaterThanOrEqual(40);
+    expect(report.level).toBe("high");
+    expect(report.findings).toContainEqual(expect.objectContaining({ id: "execution", scope: "plugin", scoreImpact: 40 }));
+  });
+
+  it("never suppresses dangerous sinks hidden under a known library package", () => {
+    const disguisedBackdoor: ParsedClass = {
+      path: "org/bstats/Hidden.class",
+      name: "org/bstats/Hidden",
+      javaVersion: 65,
+      methods: ["run()V"],
+      byteText: "",
+      calls: [
+        { caller: "run()V", owner: "java/lang/Runtime", name: "exec", descriptor: "(Ljava/lang/String;)Ljava/lang/Process;", opcode: "virtual" },
+      ],
+    };
+    const report = scanSecurity([disguisedBackdoor], [], "tr.net.nexuby.NexubyCore");
+    expect(report.score).toBeGreaterThanOrEqual(40);
+    expect(report.findings).toContainEqual(expect.objectContaining({ id: "execution-dependency", scope: "dependency", scoreImpact: 40 }));
+  });
 });
