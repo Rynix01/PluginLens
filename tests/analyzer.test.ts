@@ -141,4 +141,65 @@ describe("PluginLens analyzers", () => {
     expect(report.score).toBeGreaterThanOrEqual(60);
     expect(report.findings).toContainEqual(expect.objectContaining({ id: "plugin-propagation-chain", scoreImpact: 45 }));
   });
+
+  it("recognizes relocated MongoDB helper code without hiding its process capability", () => {
+    const mongoHelper: ParsedClass = {
+      path: "net/nexuby/nexauctionhouse/libs/mongodb/internal/capi/MongoCryptHelper.class",
+      name: "net/nexuby/nexauctionhouse/libs/mongodb/internal/capi/MongoCryptHelper",
+      javaVersion: 65,
+      methods: ["startProcess(Ljava/lang/ProcessBuilder;)V"],
+      byteText: "",
+      calls: [
+        { caller: "startProcess(Ljava/lang/ProcessBuilder;)V", owner: "java/lang/ProcessBuilder", name: "start", descriptor: "()Ljava/lang/Process;", opcode: "virtual" },
+      ],
+    };
+    const report = scanSecurity([mongoHelper], [], "net.nexuby.nexauctionhouse.NexAuctionHouse");
+    expect(report.level).toBe("low");
+    expect(report.score).toBe(8);
+    expect(report.findings).toContainEqual(expect.objectContaining({ id: "execution-dependency", scope: "dependency", scoreImpact: 8 }));
+  });
+
+  it("does not reduce arbitrary ProcessBuilder execution in relocated packages", () => {
+    const disguised: ParsedClass = {
+      path: "net/nexuby/nexauctionhouse/libs/evil/Runner.class",
+      name: "net/nexuby/nexauctionhouse/libs/evil/Runner",
+      javaVersion: 65,
+      methods: ["run()V"],
+      byteText: "",
+      calls: [
+        { caller: "run()V", owner: "java/lang/ProcessBuilder", name: "start", descriptor: "()Ljava/lang/Process;", opcode: "virtual" },
+      ],
+    };
+    const report = scanSecurity([disguised], [], "net.nexuby.nexauctionhouse.NexAuctionHouse");
+    expect(report.score).toBeGreaterThanOrEqual(40);
+    expect(report.findings).toContainEqual(expect.objectContaining({ id: "execution-dependency", scoreImpact: 40 }));
+  });
+
+  it("keeps ordinary plugin integrations low-risk alongside the MongoDB helper", () => {
+    const pluginCode: ParsedClass = {
+      path: "net/nexuby/nexauctionhouse/hook/Integrations.class",
+      name: "net/nexuby/nexauctionhouse/hook/Integrations",
+      javaVersion: 65,
+      methods: ["setup()V"],
+      byteText: "",
+      calls: [
+        { caller: "setup()V", owner: "java/net/http/HttpClient", name: "newBuilder", descriptor: "()Ljava/net/http/HttpClient$Builder;", opcode: "static" },
+        { caller: "setup()V", owner: "java/io/File", name: "exists", descriptor: "()Z", opcode: "virtual" },
+        { caller: "setup()V", owner: "java/lang/Class", name: "forName", descriptor: "(Ljava/lang/String;)Ljava/lang/Class;", opcode: "static" },
+      ],
+    };
+    const mongoHelper: ParsedClass = {
+      path: "net/nexuby/nexauctionhouse/libs/mongodb/internal/capi/MongoCryptHelper.class",
+      name: "net/nexuby/nexauctionhouse/libs/mongodb/internal/capi/MongoCryptHelper",
+      javaVersion: 65,
+      methods: ["startProcess(Ljava/lang/ProcessBuilder;)V"],
+      byteText: "",
+      calls: [
+        { caller: "startProcess(Ljava/lang/ProcessBuilder;)V", owner: "java/lang/ProcessBuilder", name: "start", descriptor: "()Ljava/lang/Process;", opcode: "virtual" },
+      ],
+    };
+    const report = scanSecurity([pluginCode, mongoHelper], [], "net.nexuby.nexauctionhouse.NexAuctionHouse");
+    expect(report.level).toBe("low");
+    expect(report.score).toBe(15);
+  });
 });

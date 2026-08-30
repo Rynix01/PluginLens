@@ -55,7 +55,7 @@ const RULES: Rule[] = [
     title: "Network capability",
     description: "Uses networking APIs. This is common for updates, webhooks, metrics and license checks; review the destination and transmitted data.",
     severity: "info",
-    impact: 5,
+    impact: 2,
     matches: ({ owner }) => startsWithAny(owner, ["java/net/URL", "java/net/Socket", "java/net/http/", "okhttp3/", "org/apache/http/"]),
   },
   {
@@ -64,7 +64,7 @@ const RULES: Rule[] = [
     title: "Persistent WebSocket channel",
     description: "Uses a bidirectional WebSocket channel capable of receiving commands or payloads while the server is running.",
     severity: "medium",
-    impact: 10,
+    impact: 8,
     matches: ({ owner }) => startsWithAny(owner, ["java/net/http/WebSocket", "javax/websocket/", "jakarta/websocket/", "org/java_websocket/", "okhttp3/WebSocket"]),
   },
   {
@@ -73,7 +73,7 @@ const RULES: Rule[] = [
     title: "Filesystem access",
     description: "Reads or writes files. Configuration, data storage and backups normally require this capability.",
     severity: "info",
-    impact: 3,
+    impact: 1,
     matches: ({ owner }) => startsWithAny(owner, ["java/io/File", "java/nio/file/Files", "java/nio/file/Path"]),
   },
   {
@@ -92,7 +92,7 @@ const RULES: Rule[] = [
     title: "Reflective or dynamic loading",
     description: "Uses reflection or dynamic class loading. Frameworks and bundled metrics libraries commonly use these APIs.",
     severity: "medium",
-    impact: 8,
+    impact: 4,
     matches: ({ owner, name }) => owner.startsWith("java/lang/reflect/") || (owner === "java/lang/Class" && name === "forName") || (owner === "java/lang/ClassLoader" && name === "loadClass"),
   },
   {
@@ -180,17 +180,18 @@ export function scanSecurity(classes: ParsedClass[], archivePaths: string[], mai
   if (embeddedJars.length) findings.push(archiveFinding("embedded-jars", "archive", "Embedded JARs", "Contains nested Java archives. These are reported as inventory, not treated as malicious by themselves.", "info", 0, embeddedJars));
 
   const score = Math.min(100, findings.reduce((total, finding) => total + finding.scoreImpact, 0));
-  return { score, level: score >= 60 ? "critical" : score >= 30 ? "high" : score >= 10 ? "medium" : "low", findings, scannedClasses: classes.length };
+  return { score, level: score >= 60 ? "critical" : score >= 40 ? "high" : score >= 20 ? "medium" : "low", findings, scannedClasses: classes.length };
 }
 
 function callFinding(rule: Rule, scope: "plugin" | "dependency", matches: Array<{ parsedClass: ParsedClass; call: MethodCall }>): SecurityFinding {
   const dependency = scope === "dependency";
-  const scoreImpact = dependency ? rule.dependencyImpact ?? 0 : rule.impact;
+  const knownLibraryHelper = dependency && matches.every(({ parsedClass, call }) => isKnownLibraryHelper(rule.id, parsedClass, call));
+  const scoreImpact = knownLibraryHelper ? 8 : dependency ? rule.dependencyImpact ?? 0 : rule.impact;
   return {
     id: dependency ? `${rule.id}-dependency` : rule.id,
     category: rule.category,
     title: rule.title,
-    description: dependency ? `${rule.description} Detected inside a known bundled library.${scoreImpact ? " This behavior is sensitive enough that library scope does not suppress it." : " Ordinary library use does not increase the plugin risk score."}` : rule.description,
+    description: dependency ? `${rule.description} Detected inside a known bundled library.${knownLibraryHelper ? " This is a recognized optional helper-process path and receives reduced—not zero—risk." : scoreImpact ? " This behavior is sensitive enough that library scope does not suppress it." : " Ordinary library use does not increase the plugin risk score."}` : rule.description,
     severity: dependency && !scoreImpact ? "info" : rule.severity,
     scope,
     scoreImpact,
@@ -263,8 +264,19 @@ function pluginPackage(mainClass?: string) {
 }
 
 function classifyClass(className: string, firstPartyPrefix?: string): "plugin" | "dependency" {
+  if (firstPartyPrefix && isRelocatedDependency(className, firstPartyPrefix)) return "dependency";
   if (firstPartyPrefix && (className === firstPartyPrefix || className.startsWith(`${firstPartyPrefix}/`))) return "plugin";
   return startsWithAny(className, KNOWN_DEPENDENCY_PREFIXES) ? "dependency" : "plugin";
+}
+function isRelocatedDependency(className: string, firstPartyPrefix: string) {
+  return ["libs", "lib", "shaded", "vendor", "thirdparty", "dependencies"].some((segment) => className.startsWith(`${firstPartyPrefix}/${segment}/`));
+}
+function isKnownLibraryHelper(ruleId: string, parsedClass: ParsedClass, call: MethodCall) {
+  return ruleId === "execution" &&
+    /\/mongodb\/internal\/capi\/MongoCryptHelper$/.test(parsedClass.name) &&
+    call.caller.startsWith("startProcess(") &&
+    call.owner === "java/lang/ProcessBuilder" &&
+    call.name === "start";
 }
 function startsWithAny(value: string, prefixes: string[]) { return prefixes.some((prefix) => value.startsWith(prefix)); }
 function unique(values: string[]) { return [...new Set(values)]; }
