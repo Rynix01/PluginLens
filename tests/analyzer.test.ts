@@ -103,4 +103,42 @@ describe("PluginLens analyzers", () => {
     expect(report.score).toBeGreaterThanOrEqual(40);
     expect(report.findings).toContainEqual(expect.objectContaining({ id: "execution-dependency", scope: "dependency", scoreImpact: 40 }));
   });
+
+  it("raises a critical remote-code chain for WebSocket input plus runtime Java compilation", () => {
+    const controller: ParsedClass = {
+      path: "evil/RemoteController.class",
+      name: "evil/RemoteController",
+      javaVersion: 65,
+      methods: ["connect()V", "execute()V"],
+      byteText: "org/java_websocket/client/WebSocketClient",
+      calls: [
+        { caller: "connect()V", owner: "org/java_websocket/client/WebSocketClient", name: "connect", descriptor: "()V", opcode: "virtual" },
+        { caller: "execute()V", owner: "javax/tools/ToolProvider", name: "getSystemJavaCompiler", descriptor: "()Ljavax/tools/JavaCompiler;", opcode: "static" },
+        { caller: "execute()V", owner: "javax/tools/JavaCompiler", name: "getTask", descriptor: "()Ljavax/tools/JavaCompiler$CompilationTask;", opcode: "interface" },
+      ],
+    };
+    const report = scanSecurity([controller], [], "me.clean.Main");
+    expect(report.level).toBe("critical");
+    expect(report.score).toBeGreaterThanOrEqual(90);
+    expect(report.findings.map((finding) => finding.id)).toEqual(expect.arrayContaining(["websocket", "dynamic-code-execution", "remote-code-chain"]));
+  });
+
+  it("raises a critical propagation chain for copying and rewriting plugin JARs", () => {
+    const infector: ParsedClass = {
+      path: "evil/PluginInfector.class",
+      name: "evil/PluginInfector",
+      javaVersion: 65,
+      methods: ["spread()V"],
+      byteText: "plugins/target.jar",
+      calls: [
+        { caller: "spread()V", owner: "org/bukkit/plugin/PluginManager", name: "getPlugins", descriptor: "()[Lorg/bukkit/plugin/Plugin;", opcode: "interface" },
+        { caller: "spread()V", owner: "java/util/jar/JarOutputStream", name: "putNextEntry", descriptor: "(Ljava/util/zip/ZipEntry;)V", opcode: "virtual" },
+        { caller: "spread()V", owner: "java/nio/file/Files", name: "copy", descriptor: "(Ljava/nio/file/Path;Ljava/nio/file/Path;[Ljava/nio/file/CopyOption;)Ljava/nio/file/Path;", opcode: "static" },
+      ],
+    };
+    const report = scanSecurity([infector], [], "me.clean.Main");
+    expect(report.level).toBe("critical");
+    expect(report.score).toBeGreaterThanOrEqual(60);
+    expect(report.findings).toContainEqual(expect.objectContaining({ id: "plugin-propagation-chain", scoreImpact: 45 }));
+  });
 });
